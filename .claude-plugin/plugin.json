@@ -1,0 +1,11 @@
+{
+  "name": "lucid-mcp-bridge",
+  "description": "Bridge Claude Code to running LUCID beamline control instances via NATS",
+  "version": "0.1.0",
+  "author": {
+    "name": "ALS Beamline Controls",
+    "email": "controls@als.lbl.gov"
+  },
+  "license": "BSD-3-Clause",
+  "keywords": ["lucid", "nats", "beamline", "ipc"]
+}

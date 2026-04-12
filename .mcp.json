@@ -1,0 +1,6 @@
+{
+  "lucid": {
+    "command": "python",
+    "args": ["-m", "lucid_bridge", "--nats-url", "nats://localhost:4222"]
+  }
+}
