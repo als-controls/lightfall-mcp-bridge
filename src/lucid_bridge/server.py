@@ -39,6 +39,24 @@ def resolve_prefix(prefix: str, default: str) -> str:
     return result
 
 
+def format_execute_response(
+    action: str,
+    response: dict,
+    action_cache: list[dict],
+) -> dict:
+    """Wrap a LUCID response with cached action metadata."""
+    match = next(
+        (a for a in action_cache if a.get("subject") == action),
+        None,
+    )
+    return {
+        "action": action,
+        "description": match["description"] if match else None,
+        "schema": match.get("schema") if match else None,
+        "response": response,
+    }
+
+
 def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
     """Build and return the FastMCP server."""
 
@@ -120,6 +138,11 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         except ValueError as exc:
             return json.dumps({"error": str(exc)})
 
+        # Auth handshake
+        auth_error = await _ensure_auth(state, target)
+        if auth_error:
+            return json.dumps({"error": auth_error})
+
         subject = f"{target}.meta.actions"
         try:
             msg = await state.nc.request(
@@ -139,5 +162,95 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         state.action_cache[target] = actions
 
         return json.dumps(data, indent=2)
+
+    async def _ensure_auth(state: BridgeState, target: str) -> str | None:
+        """Perform auth handshake if needed. Returns error string or None."""
+        auth = state.auth_state.get(target)
+        if auth == "approved":
+            return None
+        if auth == "denied":
+            return (
+                f"LUCID instance at '{target}' denied access. "
+                "Approve the trust prompt in LUCID to continue."
+            )
+        # First contact — do handshake
+        subject = f"{target}.auth.request"
+        payload = json.dumps({
+            "app_name": "claude-code-bridge",
+            "app_version": "0.1.0",
+        }).encode()
+        try:
+            msg = await state.nc.request(subject, payload, timeout=AUTH_TIMEOUT)
+            data = json.loads(msg.data)
+        except nats.errors.TimeoutError:
+            return (
+                f"Auth handshake timed out for '{target}'. "
+                "Check that LUCID is running and respond to the trust prompt."
+            )
+        except Exception as exc:
+            return f"Auth handshake failed: {exc}"
+
+        status = data.get("status")
+        if status == "approved":
+            state.auth_state[target] = "approved"
+            return None
+        else:
+            reason = data.get("reason", "denied by operator")
+            state.auth_state[target] = "denied"
+            return (
+                f"LUCID instance at '{target}' denied access: {reason}. "
+                "Approve the trust prompt in LUCID to continue."
+            )
+
+    @mcp.tool
+    async def execute_action(
+        action: str,
+        params: dict | None = None,
+        prefix: str = "",
+        ctx: Context = None,
+    ) -> str:
+        """Execute an action on a LUCID instance.
+
+        Args:
+            action: Action subject suffix (e.g. "commands.plan.run").
+            params: JSON payload to send with the action. Defaults to {}.
+            prefix: Topic prefix of the LUCID instance. Falls back to default.
+        """
+        state = _get_state(ctx)
+        if state.nc is None:
+            return json.dumps({"error": f"Cannot connect to NATS at {nats_url}"})
+
+        try:
+            target = resolve_prefix(prefix, state.default_prefix)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        # Auth handshake
+        auth_error = await _ensure_auth(state, target)
+        if auth_error:
+            return json.dumps({"error": auth_error})
+
+        # Execute
+        subject = f"{target}.{action}"
+        payload = json.dumps(params or {}).encode()
+        try:
+            msg = await state.nc.request(subject, payload, timeout=REQUEST_TIMEOUT)
+            response = json.loads(msg.data)
+        except nats.errors.TimeoutError:
+            return json.dumps({
+                "error": f"No response from '{target}' — LUCID instance "
+                         f"may be offline. Timeout: {REQUEST_TIMEOUT}s"
+            })
+        except json.JSONDecodeError:
+            return json.dumps({
+                "warning": "Response was not valid JSON",
+                "raw": msg.data.decode("utf-8", errors="replace"),
+            })
+        except Exception as exc:
+            return json.dumps({"error": f"Request failed: {exc}"})
+
+        cache = state.action_cache.get(target, [])
+        result = format_execute_response(action, response, cache)
+        return json.dumps(result, indent=2)
 
     return mcp
