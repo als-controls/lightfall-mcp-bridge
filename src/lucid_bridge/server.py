@@ -103,4 +103,41 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         await sub.unsubscribe()
         return json.dumps(responses, indent=2)
 
+    @mcp.tool
+    async def list_actions(prefix: str = "", ctx: Context = None) -> str:
+        """Get available actions from a specific LUCID instance.
+
+        Args:
+            prefix: Topic prefix of the LUCID instance (e.g. "als.7011").
+                    Falls back to the configured default prefix.
+        """
+        state = _get_state(ctx)
+        if state.nc is None:
+            return json.dumps({"error": f"Cannot connect to NATS at {nats_url}"})
+
+        try:
+            target = resolve_prefix(prefix, state.default_prefix)
+        except ValueError as exc:
+            return json.dumps({"error": str(exc)})
+
+        subject = f"{target}.meta.actions"
+        try:
+            msg = await state.nc.request(
+                subject, b"{}", timeout=REQUEST_TIMEOUT
+            )
+            data = json.loads(msg.data)
+        except nats.errors.TimeoutError:
+            return json.dumps({
+                "error": f"No response from '{target}' — LUCID instance "
+                         f"may be offline. Timeout: {REQUEST_TIMEOUT}s"
+            })
+        except Exception as exc:
+            return json.dumps({"error": f"Request failed: {exc}"})
+
+        # Cache the action metadata for execute_action
+        actions = data.get("actions", [])
+        state.action_cache[target] = actions
+
+        return json.dumps(data, indent=2)
+
     return mcp

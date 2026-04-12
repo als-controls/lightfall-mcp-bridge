@@ -30,3 +30,32 @@ class TestResolvePrefix:
     def test_raises_when_no_prefix(self):
         with pytest.raises(ValueError, match="No prefix specified"):
             resolve_prefix("", "")
+
+
+class TestActionCache:
+    def test_cache_stores_actions_by_prefix(self):
+        state = BridgeState(nc=None, default_prefix="")
+        actions = [
+            {"subject": "commands.plan.run", "description": "Run a plan", "schema": {}},
+        ]
+        state.action_cache["als.7011"] = actions
+        assert state.action_cache["als.7011"] == actions
+
+    def test_cache_replaces_on_update(self):
+        state = BridgeState(nc=None, default_prefix="")
+        state.action_cache["als.7011"] = [{"subject": "old"}]
+        state.action_cache["als.7011"] = [{"subject": "new"}]
+        assert state.action_cache["als.7011"] == [{"subject": "new"}]
+
+    def test_get_cached_action_metadata(self):
+        state = BridgeState(nc=None, default_prefix="")
+        state.action_cache["als.7011"] = [
+            {"subject": "commands.echo", "description": "Echo", "schema": {"msg": "str"}},
+        ]
+        match = next(
+            (a for a in state.action_cache.get("als.7011", [])
+             if a["subject"] == "commands.echo"),
+            None,
+        )
+        assert match is not None
+        assert match["description"] == "Echo"
