@@ -27,13 +27,13 @@ async def nats_available(nats_url):
 
 
 @pytest_asyncio.fixture
-async def mock_lucid(nats_url, nats_available):
-    """A mock LUCID instance on a unique prefix."""
+async def mock_lightfall(nats_url, nats_available):
+    """A mock Lightfall instance on a unique prefix."""
     nc = await nats.connect(nats_url)
     prefix = f"test.{uuid.uuid4().hex[:8]}"
 
     instance_id = f"mock-{uuid.uuid4().hex[:6]}"
-    display_name = "Mock LUCID"
+    display_name = "Mock Lightfall"
     actions = [
         {
             "subject": "commands.echo",
@@ -71,7 +71,7 @@ async def mock_lucid(nats_url, nats_available):
 
     subs = [
         await nc.subscribe(f"{prefix}.meta.actions", cb=handle_meta),
-        await nc.subscribe("_lucid.discover", cb=handle_discover),
+        await nc.subscribe("_lightfall.discover", cb=handle_discover),
         await nc.subscribe(f"{prefix}.commands.echo", cb=handle_echo),
         await nc.subscribe(f"{prefix}.auth.request", cb=handle_auth),
     ]

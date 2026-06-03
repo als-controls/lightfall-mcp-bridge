@@ -1,16 +1,16 @@
-# lucid-mcp-bridge
+# lightfall-mcp-bridge
 
-MCP server that bridges [Claude Code](https://claude.ai/claude-code) to running [LUCID](https://git.als.lbl.gov/ncs/ncs) beamline control instances via [NATS](https://nats.io/).
+MCP server that bridges [Claude Code](https://claude.ai/claude-code) to running [Lightfall](https://git.als.lbl.gov/ncs/ncs) beamline control instances via [NATS](https://nats.io/).
 
 ## What it does
 
 Provides three MCP tools:
 
-- **`list_instances`** — Discover LUCID instances on the NATS bus
+- **`list_instances`** — Discover Lightfall instances on the NATS bus
 - **`list_actions`** — Get available actions from a specific instance
 - **`execute_action`** — Invoke an action (run plans, abort, query state, etc.)
 
-Actions are discovered dynamically — the bridge never needs updating when LUCID adds new capabilities.
+Actions are discovered dynamically — the bridge never needs updating when Lightfall adds new capabilities.
 
 ## Installation
 
@@ -24,19 +24,19 @@ Add to your Claude Code MCP config (`.mcp.json` or settings):
 
 ```json
 {
-  "lucid": {
+  "lightfall": {
     "command": "python",
-    "args": ["-m", "lucid_bridge", "--nats-url", "nats://localhost:4222"]
+    "args": ["-m", "lightfall_bridge", "--nats-url", "nats://localhost:4222"]
   }
 }
 ```
 
-Optional: `--default-prefix als.7011` to set a default LUCID instance.
+Optional: `--default-prefix als.7011` to set a default Lightfall instance.
 
 ## Requirements
 
 - A running NATS server (local or remote)
-- A running LUCID instance with IPC enabled
+- A running Lightfall instance with IPC enabled
 
 ## Development
 

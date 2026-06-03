@@ -1,4 +1,4 @@
-"""FastMCP server bridging Claude Code to LUCID via NATS."""
+"""FastMCP server bridging Claude Code to Lightfall via NATS."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from fastmcp.server.lifespan import lifespan
 
 logger = logging.getLogger(__name__)
 
-DISCOVER_SUBJECT = "_lucid.discover"
+DISCOVER_SUBJECT = "_lightfall.discover"
 DISCOVER_TIMEOUT = 2.0
 REQUEST_TIMEOUT = 5.0
 AUTH_TIMEOUT = 10.0
@@ -34,7 +34,7 @@ def resolve_prefix(prefix: str, default: str) -> str:
     if not result:
         raise ValueError(
             "No prefix specified. Use list_instances to discover "
-            "available LUCID instances, or set --default-prefix."
+            "available Lightfall instances, or set --default-prefix."
         )
     return result
 
@@ -44,7 +44,7 @@ def format_execute_response(
     response: dict,
     action_cache: list[dict],
 ) -> dict:
-    """Wrap a LUCID response with cached action metadata."""
+    """Wrap a Lightfall response with cached action metadata."""
     match = next(
         (a for a in action_cache if a.get("subject") == action),
         None,
@@ -75,14 +75,14 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             if nc:
                 await nc.drain()
 
-    mcp = FastMCP("LUCID Bridge", lifespan=nats_lifespan)
+    mcp = FastMCP("Lightfall Bridge", lifespan=nats_lifespan)
 
     def _get_state(ctx: Context) -> BridgeState:
         return ctx.lifespan_context["bridge"]
 
     @mcp.tool
     async def list_instances(ctx: Context) -> str:
-        """Discover LUCID instances on the NATS bus.
+        """Discover Lightfall instances on the NATS bus.
 
         Broadcasts to all instances and collects responses over a
         2-second window. Returns a JSON array of discovered instances.
@@ -123,10 +123,10 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
 
     @mcp.tool
     async def list_actions(prefix: str = "", ctx: Context = None) -> str:
-        """Get available actions from a specific LUCID instance.
+        """Get available actions from a specific Lightfall instance.
 
         Args:
-            prefix: Topic prefix of the LUCID instance (e.g. "als.7011").
+            prefix: Topic prefix of the Lightfall instance (e.g. "als.7011").
                     Falls back to the configured default prefix.
         """
         state = _get_state(ctx)
@@ -151,7 +151,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             data = json.loads(msg.data)
         except nats.errors.TimeoutError:
             return json.dumps({
-                "error": f"No response from '{target}' — LUCID instance "
+                "error": f"No response from '{target}' — Lightfall instance "
                          f"may be offline. Timeout: {REQUEST_TIMEOUT}s"
             })
         except Exception as exc:
@@ -170,8 +170,8 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             return None
         if auth == "denied":
             return (
-                f"LUCID instance at '{target}' denied access. "
-                "Approve the trust prompt in LUCID to continue."
+                f"Lightfall instance at '{target}' denied access. "
+                "Approve the trust prompt in Lightfall to continue."
             )
         # First contact — do handshake
         subject = f"{target}.auth.request"
@@ -185,7 +185,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         except nats.errors.TimeoutError:
             return (
                 f"Auth handshake timed out for '{target}'. "
-                "Check that LUCID is running and respond to the trust prompt."
+                "Check that Lightfall is running and respond to the trust prompt."
             )
         except Exception as exc:
             return f"Auth handshake failed: {exc}"
@@ -198,8 +198,8 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             reason = data.get("reason", "denied by operator")
             state.auth_state[target] = "denied"
             return (
-                f"LUCID instance at '{target}' denied access: {reason}. "
-                "Approve the trust prompt in LUCID to continue."
+                f"Lightfall instance at '{target}' denied access: {reason}. "
+                "Approve the trust prompt in Lightfall to continue."
             )
 
     @mcp.tool
@@ -209,12 +209,12 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         prefix: str = "",
         ctx: Context = None,
     ) -> str:
-        """Execute an action on a LUCID instance.
+        """Execute an action on a Lightfall instance.
 
         Args:
             action: Action subject suffix (e.g. "commands.plan.run").
             params: JSON payload to send with the action. Defaults to {}.
-            prefix: Topic prefix of the LUCID instance. Falls back to default.
+            prefix: Topic prefix of the Lightfall instance. Falls back to default.
         """
         state = _get_state(ctx)
         if state.nc is None:
@@ -238,7 +238,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             response = json.loads(msg.data)
         except nats.errors.TimeoutError:
             return json.dumps({
-                "error": f"No response from '{target}' — LUCID instance "
+                "error": f"No response from '{target}' — Lightfall instance "
                          f"may be offline. Timeout: {REQUEST_TIMEOUT}s"
             })
         except json.JSONDecodeError:

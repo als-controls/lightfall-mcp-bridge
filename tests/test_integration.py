@@ -8,7 +8,7 @@ import pytest
 import pytest_asyncio
 import nats
 
-from lucid_bridge.server import BridgeState
+from lightfall_bridge.server import BridgeState
 
 
 @pytest_asyncio.fixture
@@ -22,13 +22,13 @@ async def bridge_state(nats_url, nats_available):
 
 class TestListInstances:
     @pytest.mark.asyncio
-    async def test_discovers_mock_instance(self, mock_lucid, bridge_state):
+    async def test_discovers_mock_instance(self, mock_lightfall, bridge_state):
         import asyncio
 
         nc = bridge_state.nc
         inbox = nc.new_inbox()
         sub = await nc.subscribe(inbox)
-        await nc.publish("_lucid.discover", b"{}", reply=inbox)
+        await nc.publish("_lightfall.discover", b"{}", reply=inbox)
 
         responses = []
         deadline = asyncio.get_event_loop().time() + 2.0
@@ -44,19 +44,19 @@ class TestListInstances:
         await sub.unsubscribe()
 
         prefixes = [r["prefix"] for r in responses]
-        assert mock_lucid["prefix"] in prefixes
+        assert mock_lightfall["prefix"] in prefixes
 
 
 class TestListActions:
     @pytest.mark.asyncio
-    async def test_fetches_actions_from_mock(self, mock_lucid, bridge_state):
-        prefix = mock_lucid["prefix"]
+    async def test_fetches_actions_from_mock(self, mock_lightfall, bridge_state):
+        prefix = mock_lightfall["prefix"]
         nc = bridge_state.nc
 
         msg = await nc.request(f"{prefix}.meta.actions", b"{}", timeout=5.0)
         data = json.loads(msg.data)
 
-        assert data["instance_id"] == mock_lucid["instance_id"]
+        assert data["instance_id"] == mock_lightfall["instance_id"]
         assert data["prefix"] == prefix
         assert len(data["actions"]) == 1
         assert data["actions"][0]["subject"] == "commands.echo"
@@ -64,8 +64,8 @@ class TestListActions:
 
 class TestExecuteAction:
     @pytest.mark.asyncio
-    async def test_echo_round_trip(self, mock_lucid, bridge_state):
-        prefix = mock_lucid["prefix"]
+    async def test_echo_round_trip(self, mock_lightfall, bridge_state):
+        prefix = mock_lightfall["prefix"]
         nc = bridge_state.nc
 
         payload = json.dumps({"message": "hello"}).encode()
@@ -77,8 +77,8 @@ class TestExecuteAction:
 
 class TestAuthHandshake:
     @pytest.mark.asyncio
-    async def test_auth_approved(self, mock_lucid, bridge_state):
-        prefix = mock_lucid["prefix"]
+    async def test_auth_approved(self, mock_lightfall, bridge_state):
+        prefix = mock_lightfall["prefix"]
         nc = bridge_state.nc
 
         payload = json.dumps({

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from lucid_bridge.server import BridgeState, resolve_prefix
+from lightfall_bridge.server import BridgeState, resolve_prefix
 
 
 class TestBridgeState:
@@ -79,7 +79,7 @@ class TestAuthState:
 
 class TestFormatExecuteResponse:
     def test_with_cached_metadata(self):
-        from lucid_bridge.server import format_execute_response
+        from lightfall_bridge.server import format_execute_response
 
         cache = [
             {"subject": "commands.echo", "description": "Echo", "schema": {"msg": "str"}},
@@ -95,7 +95,7 @@ class TestFormatExecuteResponse:
         assert result["response"] == {"echoed": "hello"}
 
     def test_without_cached_metadata(self):
-        from lucid_bridge.server import format_execute_response
+        from lightfall_bridge.server import format_execute_response
 
         result = format_execute_response(
             action="commands.unknown",
