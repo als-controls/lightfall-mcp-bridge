@@ -1,6 +1,6 @@
 # lightfall-mcp-bridge
 
-MCP server that bridges [Claude Code](https://claude.ai/claude-code) to running [Lightfall](https://git.als.lbl.gov/ncs/ncs) beamline control instances via [NATS](https://nats.io/).
+MCP server that bridges [Claude Code](https://claude.ai/claude-code) to running [Lightfall](https://github.com/als-controls/lightfall) beamline control instances via [NATS](https://nats.io/).
 
 ## What it does
 
