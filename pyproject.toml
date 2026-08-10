@@ -8,7 +8,28 @@ dynamic = ["version"]
 description = "MCP server bridging Claude Code to Lightfall via NATS"
 readme = "README.md"
 license = "BSD-3-Clause"
+license-files = ["LICENSE.md", "LEGAL.md"]
 requires-python = ">=3.10"
+authors = [
+    { name = "ALS Controls Team" },
+]
+keywords = [
+    "mcp",
+    "control-system",
+    "beamline",
+    "lightfall",
+    "nats",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: BSD License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+]
 dependencies = [
     "nats-py>=2.0",
     "fastmcp>=2.0.0",
@@ -21,8 +42,13 @@ dev = [
     "pytest-cov>=4.0",
 ]
 
+[project.urls]
+Homepage = "https://github.com/als-controls/lightfall-mcp-bridge"
+Repository = "https://github.com/als-controls/lightfall-mcp-bridge"
+
 [tool.hatch.version]
 source = "vcs"
+fallback-version = "0.0.0.dev0"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lightfall_bridge"]
