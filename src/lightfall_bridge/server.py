@@ -26,6 +26,31 @@ class BridgeState:
     default_prefix: str
     action_cache: dict[str, list[dict]] = field(default_factory=dict)
     auth_state: dict[str, str] = field(default_factory=dict)
+    # Per-instance capability-channel token from the approved auth reply.
+    session_tokens: dict[str, str] = field(default_factory=dict)
+
+
+def session_subject(target: str, token: str, action: str) -> str:
+    """The capability-channel subject Lightfall routes trusted actions on."""
+    return f"{target}.session.{token}.{action}"
+
+
+def _denied_message(response: object) -> str:
+    if not isinstance(response, dict):
+        return ""
+    if response.get("status") != "error" or response.get("code") != "denied":
+        return ""
+    return str(response.get("message", ""))
+
+
+def needs_session_channel(response: object) -> bool:
+    """Lightfall refused a trusted action sent on the bare subject."""
+    return "session capability channel" in _denied_message(response)
+
+
+def session_expired(response: object) -> bool:
+    """Lightfall no longer knows our channel token (re-login, trust revoked)."""
+    return "invalid or expired session token" in _denied_message(response).lower()
 
 
 def resolve_prefix(prefix: str, default: str) -> str:
@@ -193,6 +218,9 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         status = data.get("status")
         if status == "approved":
             state.auth_state[target] = "approved"
+            token = data.get("session_token")
+            if token:
+                state.session_tokens[target] = token
             return None
         else:
             reason = data.get("reason", "denied by operator")
@@ -230,12 +258,33 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         if auth_error:
             return json.dumps({"error": auth_error})
 
-        # Execute
-        subject = f"{target}.{action}"
+        # Execute. Public actions answer on the bare subject; trusted ones
+        # (device, plan, agent, ...) only on the session capability channel.
         payload = json.dumps(params or {}).encode()
-        try:
+
+        last_raw: dict[str, bytes] = {}
+
+        async def _send(subject: str) -> object:
             msg = await state.nc.request(subject, payload, timeout=REQUEST_TIMEOUT)
-            response = json.loads(msg.data)
+            last_raw["data"] = msg.data
+            return json.loads(msg.data)
+
+        try:
+            response = await _send(f"{target}.{action}")
+            for _attempt in range(2):
+                if not (needs_session_channel(response) or session_expired(response)):
+                    break
+                if session_expired(response) or target not in state.session_tokens:
+                    # Re-handshake once for a fresh channel token.
+                    state.auth_state.pop(target, None)
+                    state.session_tokens.pop(target, None)
+                    auth_error = await _ensure_auth(state, target)
+                    if auth_error:
+                        return json.dumps({"error": auth_error})
+                token = state.session_tokens.get(target)
+                if not token:
+                    break
+                response = await _send(session_subject(target, token, action))
         except nats.errors.TimeoutError:
             return json.dumps({
                 "error": f"No response from '{target}' — Lightfall instance "
@@ -244,7 +293,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         except json.JSONDecodeError:
             return json.dumps({
                 "warning": "Response was not valid JSON",
-                "raw": msg.data.decode("utf-8", errors="replace"),
+                "raw": last_raw.get("data", b"").decode("utf-8", errors="replace"),
             })
         except Exception as exc:
             return json.dumps({"error": f"Request failed: {exc}"})

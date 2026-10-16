@@ -105,3 +105,43 @@ class TestFormatExecuteResponse:
         assert result["description"] is None
         assert result["schema"] is None
         assert result["response"] == {"status": "ok"}
+
+
+class TestSessionChannel:
+    """Lightfall routes trusted actions only on {prefix}.session.{token}.{action}."""
+
+    DENIED = {
+        "status": "error",
+        "code": "denied",
+        "message": "This action requires a session capability channel; "
+        "complete the auth.request handshake and use the session subject.",
+        "contract_version": 1,
+    }
+
+    def test_session_subject(self):
+        from lightfall_bridge.server import session_subject
+
+        assert session_subject("dev.x", "tok", "commands.device.search") == (
+            "dev.x.session.tok.commands.device.search"
+        )
+
+    def test_needs_session_channel(self):
+        from lightfall_bridge.server import needs_session_channel
+
+        assert needs_session_channel(self.DENIED)
+        assert not needs_session_channel({"status": "ok"})
+        assert not needs_session_channel({"status": "error", "code": "denied", "message": "nope"})
+        assert not needs_session_channel(["not", "a", "dict"])
+
+    def test_session_expired(self):
+        from lightfall_bridge.server import session_expired
+
+        assert session_expired(
+            {"status": "error", "code": "denied", "message": "Invalid or expired session token"}
+        )
+        assert not session_expired(self.DENIED)
+
+    def test_state_keeps_session_tokens(self):
+        from lightfall_bridge.server import BridgeState
+
+        assert BridgeState(nc=None, default_prefix="").session_tokens == {}
