@@ -297,6 +297,11 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                          "session channel (it may have restarted or logged out)"
             })
 
+        def _no_channel() -> str:
+            return json.dumps({
+                "error": f"{target} approved the handshake but offered no session channel"
+            })
+
         async def _reset_auth() -> str | None:
             state.auth_state.pop(target, None)
             state.session_subjects.pop(target, None)
@@ -312,29 +317,27 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         # the session capability channel, sent with private_request (an
         # unguessable reply subject). Private actions (catalog "private": true,
         # e.g. auth.request) live on the private root and are never sent here.
-        # _ensure_auth already ran, so a session subject is normally cached; if
-        # an instance approved us without one (legacy, no auth callout) we fall
-        # back to the bare subject.
+        # _ensure_auth already ran, so a session subject is cached. If an
+        # instance approved us without one, fail closed: never fall back to the
+        # bare subject for a trusted action.
         try:
-            if action.startswith("meta.") or not state.session_subjects.get(target):
+            if action.startswith("meta."):
                 try:
                     response = await _send(f"{target}.{action}")
                 except nats.errors.NoRespondersError:
                     return json.dumps({
                         "error": f"No Lightfall instance is answering at '{target}'"
                     })
-                if not (needs_session_channel(response) or session_expired(response)):
-                    return _finish(response)
-                if session_expired(response) or target not in state.session_subjects:
-                    auth_error = await _reset_auth()
-                    if auth_error:
-                        return json.dumps({"error": auth_error})
+                return _finish(response)
+
+            if not state.session_subjects.get(target):
+                return _no_channel()
 
             rehandshaked_on_dead = False
             for _attempt in range(3):
                 subject = state.session_subjects.get(target)
                 if not subject:
-                    break
+                    return _no_channel()
                 try:
                     response = await _send_session(session_call_subject(subject, action))
                 except _NO_RESPONDERS:
@@ -347,14 +350,20 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                     if auth_error:
                         return json.dumps({"error": auth_error})
                     if not state.session_subjects.get(target):
-                        return _not_answering()
+                        return _no_channel()
                     continue
                 if not session_expired(response):
                     break
+                if _attempt == 2:
+                    continue  # out of attempts: fall to the for/else error
                 # Re-handshake for a fresh channel token and retry.
                 auth_error = await _reset_auth()
                 if auth_error:
                     return json.dumps({"error": auth_error})
+            else:
+                return json.dumps({
+                    "error": f"Lightfall instance '{target}': session could not be refreshed"
+                })
         except nats.errors.TimeoutError:
             return json.dumps({
                 "error": f"No response from '{target}' — Lightfall instance "

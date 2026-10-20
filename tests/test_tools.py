@@ -312,10 +312,10 @@ class TestExecuteActionHandshake:
     def test_bare_subject_no_responders_is_a_json_error(self):
         from lightfall_bridge.server import BridgeState
 
-        nc = _FakeNc({"pre.commands.dev.get": [NO_RESPONDERS]})
+        nc = _FakeNc({"pre.meta.actions": [NO_RESPONDERS]})
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
-        out = self._run(state)
+        out = self._run(state, action="meta.actions")
         assert "No Lightfall instance is answering" in out["error"]
 
     def test_cached_session_never_touches_bare_subject(self):
@@ -341,4 +341,34 @@ class TestExecuteActionHandshake:
         self._run(state, action="meta.actions")
         assert nc.calls == ["pre.meta.actions"]
         assert nc.private_calls == []
+
+    def test_no_session_subject_fails_closed(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc({})
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        out = self._run(state)
+        assert "offered no session channel" in out["error"]
+        assert nc.calls == []
+
+    def test_repeated_expired_reply_is_a_clear_error(self):
+        from lightfall_bridge.server import BridgeState
+
+        expired = {"status": "error", "code": "denied", "message": "Invalid or expired session token"}
+        root = "_PRIV.pppppppppppppppppppppppppp"
+        nc = _FakeNc(
+            {
+                f"{root}.session.a.commands.dev.get": [expired],
+                f"{root}.auth.request": [_approved("b"), _approved("c")],
+                f"{root}.session.b.commands.dev.get": [expired],
+                f"{root}.session.c.commands.dev.get": [expired],
+            }
+        )
+        nc.replies["pre.meta.actions"] = [{"priv_root": root}] * 3
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = f"{root}.session.a"
+        out = self._run(state)
+        assert "session could not be refreshed" in out["error"]
 
