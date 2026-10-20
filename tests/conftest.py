@@ -68,7 +68,6 @@ async def mock_lightfall(nats_url, nats_available):
             await nc.publish(msg.reply, reply_data)
 
     async def handle_auth(msg):
-        data = json.loads(msg.data)
         reply_data = json.dumps({
             "status": "approved",
             "session_subject": f"{cap.priv_root}.session.tok",

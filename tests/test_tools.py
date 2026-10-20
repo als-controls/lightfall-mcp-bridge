@@ -206,9 +206,6 @@ class _FakeSub:
         pass
 
 
-APPROVED = "approved"
-
-
 def _approved(token):
     return {
         "status": "approved",
@@ -220,7 +217,7 @@ def _approved(token):
 class TestExecuteActionHandshake:
     DENIED = TestSessionChannel.DENIED
 
-    def _run(self, nc, tmp_ctx_state):
+    def _run(self, tmp_ctx_state, action="commands.dev.get"):
         from lightfall_bridge.server import create_server
 
         mcp = create_server("nats://x", "pre")
@@ -228,7 +225,7 @@ class TestExecuteActionHandshake:
         async def go():
             tool = await mcp.get_tool("execute_action")
             ctx = types.SimpleNamespace(lifespan_context={"bridge": tmp_ctx_state})
-            return json.loads(await tool.fn(action="commands.dev.get", params={}, ctx=ctx))
+            return json.loads(await tool.fn(action=action, params={}, ctx=ctx))
 
         return asyncio.run(go())
 
@@ -239,15 +236,15 @@ class TestExecuteActionHandshake:
             {
                 "pre.meta.actions": [{"priv_root": "_PRIV.pppppppppppppppppppppppppp", "actions": []}],
                 "_PRIV.pppppppppppppppppppppppppp.auth.request": [_approved("t1")],
-                "pre.commands.dev.get": [self.DENIED],
                 "_PRIV.pppppppppppppppppppppppppp.session.t1.commands.dev.get": [{"status": "ok"}],
             }
         )
         state = BridgeState(nc=nc, default_prefix="pre")
-        out = self._run(nc, state)
+        out = self._run(state)
         assert out["response"] == {"status": "ok"}
         assert state.session_subjects["pre"] == "_PRIV.pppppppppppppppppppppppppp.session.t1"
         assert "pre.auth.request" not in nc.calls
+        assert "pre.commands.dev.get" not in nc.calls  # never the forgeable bare subject
         # The auth leg and the session call both use unguessable reply subjects.
         assert [s for s, _ in nc.private_calls] == [
             "_PRIV.pppppppppppppppppppppppppp.auth.request",
@@ -262,14 +259,14 @@ class TestExecuteActionHandshake:
             {
                 "pre.meta.actions": [{"priv_root": "_PRIV.pppppppppppppppppppppppppp"}],
                 "_PRIV.pppppppppppppppppppppppppp.auth.request": [_approved("t2")],
-                "pre.commands.dev.get": [expired],
+                "_PRIV.pppppppppppppppppppppppppp.session.old.commands.dev.get": [expired],
                 "_PRIV.pppppppppppppppppppppppppp.session.t2.commands.dev.get": [{"status": "ok"}],
             }
         )
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
         state.session_subjects["pre"] = "_PRIV.pppppppppppppppppppppppppp.session.old"
-        out = self._run(nc, state)
+        out = self._run(state)
         assert out["response"] == {"status": "ok"}
         assert state.session_subjects["pre"] == "_PRIV.pppppppppppppppppppppppppp.session.t2"
 
@@ -282,7 +279,6 @@ class TestExecuteActionHandshake:
                 "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.auth.request": [
                     {"status": "approved", "session_subject": "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3"}
                 ],
-                "pre.commands.dev.get": [self.DENIED],
                 "_PRIV.oooooooooooooooooooooooooo.session.t0.commands.dev.get": [NO_RESPONDERS],
                 "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3.commands.dev.get": [{"status": "ok"}],
             }
@@ -290,7 +286,7 @@ class TestExecuteActionHandshake:
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
         state.session_subjects["pre"] = "_PRIV.oooooooooooooooooooooooooo.session.t0"
-        out = self._run(nc, state)
+        out = self._run(state)
         assert out["response"] == {"status": "ok"}
         assert state.session_subjects["pre"] == "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3"
 
@@ -303,7 +299,6 @@ class TestExecuteActionHandshake:
                 "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.auth.request": [
                     {"status": "approved", "session_subject": "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3"}
                 ],
-                "pre.commands.dev.get": [self.DENIED],
                 "_PRIV.oooooooooooooooooooooooooo.session.t0.commands.dev.get": [NO_RESPONDERS],
                 "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3.commands.dev.get": [NO_RESPONDERS],
             }
@@ -311,7 +306,7 @@ class TestExecuteActionHandshake:
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
         state.session_subjects["pre"] = "_PRIV.oooooooooooooooooooooooooo.session.t0"
-        out = self._run(nc, state)
+        out = self._run(state)
         assert "not answering on its session channel" in out["error"]
 
     def test_bare_subject_no_responders_is_a_json_error(self):
@@ -320,5 +315,30 @@ class TestExecuteActionHandshake:
         nc = _FakeNc({"pre.commands.dev.get": [NO_RESPONDERS]})
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
-        out = self._run(nc, state)
+        out = self._run(state)
         assert "No Lightfall instance is answering" in out["error"]
+
+    def test_cached_session_never_touches_bare_subject(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc(
+            {"_PRIV.pppppppppppppppppppppppppp.session.t1.commands.dev.get": [{"status": "ok"}]}
+        )
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = "_PRIV.pppppppppppppppppppppppppp.session.t1"
+        out = self._run(state)
+        assert out["response"] == {"status": "ok"}
+        assert nc.calls == ["_PRIV.pppppppppppppppppppppppppp.session.t1.commands.dev.get"]
+
+    def test_meta_actions_stay_on_bare_subject(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc({"pre.meta.actions": [{"actions": []}]})
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = "_PRIV.pppppppppppppppppppppppppp.session.t1"
+        self._run(state, action="meta.actions")
+        assert nc.calls == ["pre.meta.actions"]
+        assert nc.private_calls == []
+

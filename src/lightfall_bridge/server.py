@@ -302,24 +302,36 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             state.session_subjects.pop(target, None)
             return await _ensure_auth(state, target)
 
+        def _finish(response: object) -> str:
+            cache = state.action_cache.get(target, [])
+            return json.dumps(format_execute_response(action, response, cache), indent=2)
+
+        # Routing rule: only the public `meta.*` actions go to the bare subject
+        # (its reply subject is predictable and forgeable via allow_responses
+        # reflection). Every other action is trusted and is reachable only on
+        # the session capability channel, sent with private_request (an
+        # unguessable reply subject). Private actions (catalog "private": true,
+        # e.g. auth.request) live on the private root and are never sent here.
+        # _ensure_auth already ran, so a session subject is normally cached; if
+        # an instance approved us without one (legacy, no auth callout) we fall
+        # back to the bare subject.
         try:
-            try:
-                response = await _send(f"{target}.{action}")
-            except nats.errors.NoRespondersError:
-                return json.dumps({
-                    "error": f"No Lightfall instance is answering at '{target}'"
-                })
-            rehandshaked_on_dead = False
-            for _attempt in range(3):
+            if action.startswith("meta.") or not state.session_subjects.get(target):
+                try:
+                    response = await _send(f"{target}.{action}")
+                except nats.errors.NoRespondersError:
+                    return json.dumps({
+                        "error": f"No Lightfall instance is answering at '{target}'"
+                    })
                 if not (needs_session_channel(response) or session_expired(response)):
-                    break
+                    return _finish(response)
                 if session_expired(response) or target not in state.session_subjects:
-                    # Re-handshake once for a fresh channel token.
-                    state.auth_state.pop(target, None)
-                    state.session_subjects.pop(target, None)
-                    auth_error = await _ensure_auth(state, target)
+                    auth_error = await _reset_auth()
                     if auth_error:
                         return json.dumps({"error": auth_error})
+
+            rehandshaked_on_dead = False
+            for _attempt in range(3):
                 subject = state.session_subjects.get(target)
                 if not subject:
                     break
@@ -334,13 +346,15 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                     auth_error = await _reset_auth()
                     if auth_error:
                         return json.dumps({"error": auth_error})
-                    subject = state.session_subjects.get(target)
-                    if not subject:
+                    if not state.session_subjects.get(target):
                         return _not_answering()
-                    try:
-                        response = await _send_session(session_call_subject(subject, action))
-                    except _NO_RESPONDERS:
-                        return _not_answering()
+                    continue
+                if not session_expired(response):
+                    break
+                # Re-handshake for a fresh channel token and retry.
+                auth_error = await _reset_auth()
+                if auth_error:
+                    return json.dumps({"error": auth_error})
         except nats.errors.TimeoutError:
             return json.dumps({
                 "error": f"No response from '{target}' — Lightfall instance "
@@ -354,8 +368,6 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         except Exception as exc:
             return json.dumps({"error": f"Request failed: {exc}"})
 
-        cache = state.action_cache.get(target, [])
-        result = format_execute_response(action, response, cache)
-        return json.dumps(result, indent=2)
+        return _finish(response)
 
     return mcp
