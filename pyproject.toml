@@ -31,7 +31,7 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "nats-py>=2.0",
+    "nats-py>=2.1",
     "fastmcp>=2.0.0",
 ]
 
