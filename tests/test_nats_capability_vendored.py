@@ -1,4 +1,4 @@
-"""The vendored capability module must match lightfall_utils.ipc.capability v1."""
+"""The vendored capability module must match lightfall_utils.ipc.capability v2."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from lightfall_bridge import nats_capability as cap
 
 
 def test_vendored_version_marker():
-    assert cap.VENDORED_FROM == "lightfall_utils.ipc.capability v1"
+    assert cap.VENDORED_FROM == "lightfall_utils.ipc.capability v2"
 
 
 def test_prefix_vectors():

@@ -165,6 +165,10 @@ class _FakeNc:
     def __init__(self, replies):
         self.replies = replies  # subject -> list of replies (popped in order)
         self.calls = []
+        self.private_calls = []  # (subject, reply) sent via private_request
+        self.subs = {}
+
+    _inbox_prefix = bytearray(b"_INBOX.fake")
 
     async def request(self, subject, payload=b"", timeout=0.5):
         import nats.errors
@@ -175,6 +179,32 @@ class _FakeNc:
             raise nats.errors.NoRespondersError
         return _Msg(reply)
 
+    # private_request path: subscribe(inbox) + publish(reply=inbox) + next_msg
+    async def subscribe(self, subject, max_msgs=0):
+        sub = _FakeSub()
+        self.subs[subject] = sub
+        return sub
+
+    async def publish(self, subject, payload=b"", reply=""):
+        self.calls.append(subject)
+        self.private_calls.append((subject, reply))
+        assert reply.startswith("_INBOX.fake.") and len(reply.rsplit(".", 1)[1]) == 43
+        answer = self.replies[subject].pop(0)
+        msg = _Msg({}) if answer is NO_RESPONDERS else _Msg(answer)
+        msg.headers = {"Status": "503"} if answer is NO_RESPONDERS else None
+        self.subs[reply].queue.append(msg)
+
+
+class _FakeSub:
+    def __init__(self):
+        self.queue = []
+
+    async def next_msg(self, timeout=1.0):
+        return self.queue.pop(0)
+
+    async def unsubscribe(self):
+        pass
+
 
 APPROVED = "approved"
 
@@ -183,7 +213,7 @@ def _approved(token):
     return {
         "status": "approved",
         "session_token": token,
-        "session_subject": f"_PRIV.p.session.{token}",
+        "session_subject": f"_PRIV.pppppppppppppppppppppppppp.session.{token}",
     }
 
 
@@ -207,17 +237,22 @@ class TestExecuteActionHandshake:
 
         nc = _FakeNc(
             {
-                "pre.meta.actions": [{"priv_root": "_PRIV.p", "actions": []}],
-                "_PRIV.p.auth.request": [_approved("t1")],
+                "pre.meta.actions": [{"priv_root": "_PRIV.pppppppppppppppppppppppppp", "actions": []}],
+                "_PRIV.pppppppppppppppppppppppppp.auth.request": [_approved("t1")],
                 "pre.commands.dev.get": [self.DENIED],
-                "_PRIV.p.session.t1.commands.dev.get": [{"status": "ok"}],
+                "_PRIV.pppppppppppppppppppppppppp.session.t1.commands.dev.get": [{"status": "ok"}],
             }
         )
         state = BridgeState(nc=nc, default_prefix="pre")
         out = self._run(nc, state)
         assert out["response"] == {"status": "ok"}
-        assert state.session_subjects["pre"] == "_PRIV.p.session.t1"
+        assert state.session_subjects["pre"] == "_PRIV.pppppppppppppppppppppppppp.session.t1"
         assert "pre.auth.request" not in nc.calls
+        # The auth leg and the session call both use unguessable reply subjects.
+        assert [s for s, _ in nc.private_calls] == [
+            "_PRIV.pppppppppppppppppppppppppp.auth.request",
+            "_PRIV.pppppppppppppppppppppppppp.session.t1.commands.dev.get",
+        ]
 
     def test_expired_session_rehandshakes(self):
         from lightfall_bridge.server import BridgeState
@@ -225,57 +260,57 @@ class TestExecuteActionHandshake:
         expired = {"status": "error", "code": "denied", "message": "Invalid or expired session token"}
         nc = _FakeNc(
             {
-                "pre.meta.actions": [{"priv_root": "_PRIV.p"}],
-                "_PRIV.p.auth.request": [_approved("t2")],
+                "pre.meta.actions": [{"priv_root": "_PRIV.pppppppppppppppppppppppppp"}],
+                "_PRIV.pppppppppppppppppppppppppp.auth.request": [_approved("t2")],
                 "pre.commands.dev.get": [expired],
-                "_PRIV.p.session.t2.commands.dev.get": [{"status": "ok"}],
+                "_PRIV.pppppppppppppppppppppppppp.session.t2.commands.dev.get": [{"status": "ok"}],
             }
         )
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
-        state.session_subjects["pre"] = "_PRIV.p.session.old"
+        state.session_subjects["pre"] = "_PRIV.pppppppppppppppppppppppppp.session.old"
         out = self._run(nc, state)
         assert out["response"] == {"status": "ok"}
-        assert state.session_subjects["pre"] == "_PRIV.p.session.t2"
+        assert state.session_subjects["pre"] == "_PRIV.pppppppppppppppppppppppppp.session.t2"
 
     def test_stale_session_subject_no_responders_rehandshakes(self):
         from lightfall_bridge.server import BridgeState
 
         nc = _FakeNc(
             {
-                "pre.meta.actions": [{"priv_root": "_PRIV.new"}],
-                "_PRIV.new.auth.request": [
-                    {"status": "approved", "session_subject": "_PRIV.new.session.t3"}
+                "pre.meta.actions": [{"priv_root": "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn"}],
+                "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.auth.request": [
+                    {"status": "approved", "session_subject": "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3"}
                 ],
                 "pre.commands.dev.get": [self.DENIED],
-                "_PRIV.old.session.t0.commands.dev.get": [NO_RESPONDERS],
-                "_PRIV.new.session.t3.commands.dev.get": [{"status": "ok"}],
+                "_PRIV.oooooooooooooooooooooooooo.session.t0.commands.dev.get": [NO_RESPONDERS],
+                "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3.commands.dev.get": [{"status": "ok"}],
             }
         )
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
-        state.session_subjects["pre"] = "_PRIV.old.session.t0"
+        state.session_subjects["pre"] = "_PRIV.oooooooooooooooooooooooooo.session.t0"
         out = self._run(nc, state)
         assert out["response"] == {"status": "ok"}
-        assert state.session_subjects["pre"] == "_PRIV.new.session.t3"
+        assert state.session_subjects["pre"] == "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3"
 
     def test_double_no_responders_returns_clear_error(self):
         from lightfall_bridge.server import BridgeState
 
         nc = _FakeNc(
             {
-                "pre.meta.actions": [{"priv_root": "_PRIV.new"}],
-                "_PRIV.new.auth.request": [
-                    {"status": "approved", "session_subject": "_PRIV.new.session.t3"}
+                "pre.meta.actions": [{"priv_root": "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn"}],
+                "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.auth.request": [
+                    {"status": "approved", "session_subject": "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3"}
                 ],
                 "pre.commands.dev.get": [self.DENIED],
-                "_PRIV.old.session.t0.commands.dev.get": [NO_RESPONDERS],
-                "_PRIV.new.session.t3.commands.dev.get": [NO_RESPONDERS],
+                "_PRIV.oooooooooooooooooooooooooo.session.t0.commands.dev.get": [NO_RESPONDERS],
+                "_PRIV.nnnnnnnnnnnnnnnnnnnnnnnnnn.session.t3.commands.dev.get": [NO_RESPONDERS],
             }
         )
         state = BridgeState(nc=nc, default_prefix="pre")
         state.auth_state["pre"] = "approved"
-        state.session_subjects["pre"] = "_PRIV.old.session.t0"
+        state.session_subjects["pre"] = "_PRIV.oooooooooooooooooooooooooo.session.t0"
         out = self._run(nc, state)
         assert "not answering on its session channel" in out["error"]
 

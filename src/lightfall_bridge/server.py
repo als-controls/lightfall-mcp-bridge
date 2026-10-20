@@ -11,7 +11,12 @@ import nats
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
 
-from lightfall_bridge.nats_capability import new_capability, private_auth_request
+from lightfall_bridge.nats_capability import (
+    PrivateNoResponders,
+    new_capability,
+    private_auth_request,
+    private_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +36,9 @@ class BridgeState:
     # Per-instance capability-channel subject ("_PRIV.<p>.session.<token>")
     # from the approved auth reply.
     session_subjects: dict[str, str] = field(default_factory=dict)
+
+
+_NO_RESPONDERS = (nats.errors.NoRespondersError, PrivateNoResponders)
 
 
 def session_call_subject(session_subject: str, action: str) -> str:
@@ -268,9 +276,20 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         last_raw: dict[str, bytes] = {}
 
         async def _send(subject: str) -> object:
+            # Public subject: a plain request (its reply is forgeable, like discovery).
             msg = await state.nc.request(subject, payload, timeout=REQUEST_TIMEOUT)
             last_raw["data"] = msg.data
             return json.loads(msg.data)
+
+        async def _send_session(subject: str) -> object:
+            # Session channel: unguessable reply subject, so the reply can't be forged.
+            try:
+                return await private_request(
+                    state.nc, subject, params or {}, timeout=REQUEST_TIMEOUT
+                )
+            except json.JSONDecodeError as exc:
+                last_raw["data"] = exc.doc.encode()
+                raise
 
         def _not_answering() -> str:
             return json.dumps({
@@ -305,8 +324,8 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                 if not subject:
                     break
                 try:
-                    response = await _send(session_call_subject(subject, action))
-                except nats.errors.NoRespondersError:
+                    response = await _send_session(session_call_subject(subject, action))
+                except _NO_RESPONDERS:
                     # Stale subject: the instance restarted (new _PRIV root) or
                     # logged out. Re-handshake once and retry on the fresh one.
                     if rehandshaked_on_dead:
@@ -319,8 +338,8 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                     if not subject:
                         return _not_answering()
                     try:
-                        response = await _send(session_call_subject(subject, action))
-                    except nats.errors.NoRespondersError:
+                        response = await _send_session(session_call_subject(subject, action))
+                    except _NO_RESPONDERS:
                         return _not_answering()
         except nats.errors.TimeoutError:
             return json.dumps({
