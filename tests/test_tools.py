@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
+import types
+
 import pytest
 
 from lightfall_bridge.server import BridgeState, resolve_prefix
@@ -108,7 +112,7 @@ class TestFormatExecuteResponse:
 
 
 class TestSessionChannel:
-    """Lightfall routes trusted actions only on {prefix}.session.{token}.{action}."""
+    """Lightfall routes trusted actions only on {session_subject}.{action}."""
 
     DENIED = {
         "status": "error",
@@ -118,11 +122,11 @@ class TestSessionChannel:
         "contract_version": 1,
     }
 
-    def test_session_subject(self):
-        from lightfall_bridge.server import session_subject
+    def test_session_call_subject(self):
+        from lightfall_bridge.server import session_call_subject
 
-        assert session_subject("dev.x", "tok", "commands.device.search") == (
-            "dev.x.session.tok.commands.device.search"
+        assert session_call_subject("_PRIV.abc.session.tok", "commands.device.search") == (
+            "_PRIV.abc.session.tok.commands.device.search"
         )
 
     def test_needs_session_channel(self):
@@ -141,7 +145,87 @@ class TestSessionChannel:
         )
         assert not session_expired(self.DENIED)
 
-    def test_state_keeps_session_tokens(self):
+    def test_state_keeps_session_subjects(self):
         from lightfall_bridge.server import BridgeState
 
-        assert BridgeState(nc=None, default_prefix="").session_tokens == {}
+        assert BridgeState(nc=None, default_prefix="").session_subjects == {}
+
+
+class _Msg:
+    def __init__(self, obj):
+        self.data = json.dumps(obj).encode()
+
+
+class _FakeNc:
+    """Fake NATS client scripting meta.actions, the private handshake and calls."""
+
+    def __init__(self, replies):
+        self.replies = replies  # subject -> list of replies (popped in order)
+        self.calls = []
+
+    async def request(self, subject, payload=b"", timeout=0.5):
+        self.calls.append(subject)
+        return _Msg(self.replies[subject].pop(0))
+
+
+APPROVED = "approved"
+
+
+def _approved(token):
+    return {
+        "status": "approved",
+        "session_token": token,
+        "session_subject": f"_PRIV.p.session.{token}",
+    }
+
+
+class TestExecuteActionHandshake:
+    DENIED = TestSessionChannel.DENIED
+
+    def _run(self, nc, tmp_ctx_state):
+        from lightfall_bridge.server import create_server
+
+        mcp = create_server("nats://x", "pre")
+
+        async def go():
+            tool = await mcp.get_tool("execute_action")
+            ctx = types.SimpleNamespace(lifespan_context={"bridge": tmp_ctx_state})
+            return json.loads(await tool.fn(action="commands.dev.get", params={}, ctx=ctx))
+
+        return asyncio.run(go())
+
+    def test_handshake_on_private_root_and_session_subject_call(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc(
+            {
+                "pre.meta.actions": [{"priv_root": "_PRIV.p", "actions": []}],
+                "_PRIV.p.auth.request": [_approved("t1")],
+                "pre.commands.dev.get": [self.DENIED],
+                "_PRIV.p.session.t1.commands.dev.get": [{"status": "ok"}],
+            }
+        )
+        state = BridgeState(nc=nc, default_prefix="pre")
+        out = self._run(nc, state)
+        assert out["response"] == {"status": "ok"}
+        assert state.session_subjects["pre"] == "_PRIV.p.session.t1"
+        assert "pre.auth.request" not in nc.calls
+
+    def test_expired_session_rehandshakes(self):
+        from lightfall_bridge.server import BridgeState
+
+        expired = {"status": "error", "code": "denied", "message": "Invalid or expired session token"}
+        nc = _FakeNc(
+            {
+                "pre.meta.actions": [{"priv_root": "_PRIV.p"}],
+                "_PRIV.p.auth.request": [_approved("t2")],
+                "pre.commands.dev.get": [expired],
+                "_PRIV.p.session.t2.commands.dev.get": [{"status": "ok"}],
+            }
+        )
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = "_PRIV.p.session.old"
+        out = self._run(nc, state)
+        assert out["response"] == {"status": "ok"}
+        assert state.session_subjects["pre"] == "_PRIV.p.session.t2"

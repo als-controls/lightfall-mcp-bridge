@@ -8,13 +8,14 @@ import pytest
 import pytest_asyncio
 import nats
 
+from lightfall_bridge.nats_capability import new_capability, private_auth_request
 from lightfall_bridge.server import BridgeState
 
 
 @pytest_asyncio.fixture
 async def bridge_state(nats_url, nats_available):
     """A connected BridgeState for direct NATS testing."""
-    nc = await nats.connect(nats_url)
+    nc = await nats.connect(nats_url, **new_capability().connect_kwargs())
     state = BridgeState(nc=nc, default_prefix="")
     yield state
     await nc.drain()
@@ -81,11 +82,11 @@ class TestAuthHandshake:
         prefix = mock_lightfall["prefix"]
         nc = bridge_state.nc
 
-        payload = json.dumps({
+        payload = {
             "app_name": "claude-code-bridge",
             "app_version": "0.1.0",
-        }).encode()
-        msg = await nc.request(f"{prefix}.auth.request", payload, timeout=5.0)
-        data = json.loads(msg.data)
+        }
+        data = await private_auth_request(nc, prefix, payload, timeout=5.0)
 
         assert data["status"] == "approved"
+        assert data["session_subject"].startswith("_PRIV.")

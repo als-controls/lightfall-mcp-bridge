@@ -11,6 +11,8 @@ import nats
 from fastmcp import FastMCP, Context
 from fastmcp.server.lifespan import lifespan
 
+from lightfall_bridge.nats_capability import new_capability, private_auth_request
+
 logger = logging.getLogger(__name__)
 
 DISCOVER_SUBJECT = "_lightfall.discover"
@@ -26,13 +28,14 @@ class BridgeState:
     default_prefix: str
     action_cache: dict[str, list[dict]] = field(default_factory=dict)
     auth_state: dict[str, str] = field(default_factory=dict)
-    # Per-instance capability-channel token from the approved auth reply.
-    session_tokens: dict[str, str] = field(default_factory=dict)
+    # Per-instance capability-channel subject ("_PRIV.<p>.session.<token>")
+    # from the approved auth reply.
+    session_subjects: dict[str, str] = field(default_factory=dict)
 
 
-def session_subject(target: str, token: str, action: str) -> str:
+def session_call_subject(session_subject: str, action: str) -> str:
     """The capability-channel subject Lightfall routes trusted actions on."""
-    return f"{target}.session.{token}.{action}"
+    return f"{session_subject}.{action}"
 
 
 def _denied_message(response: object) -> str:
@@ -89,7 +92,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
     async def nats_lifespan(server):
         nc = None
         try:
-            nc = await nats.connect(nats_url)
+            nc = await nats.connect(nats_url, **new_capability().connect_kwargs())
             logger.info("Connected to NATS at %s", nats_url)
         except Exception as exc:
             logger.warning("Failed to connect to NATS at %s: %s", nats_url, exc)
@@ -199,14 +202,14 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                 "Approve the trust prompt in Lightfall to continue."
             )
         # First contact — do handshake
-        subject = f"{target}.auth.request"
-        payload = json.dumps({
+        payload = {
             "app_name": "claude-code-bridge",
             "app_version": "0.1.0",
-        }).encode()
+        }
         try:
-            msg = await state.nc.request(subject, payload, timeout=AUTH_TIMEOUT)
-            data = json.loads(msg.data)
+            data = await private_auth_request(
+                state.nc, target, payload, timeout=AUTH_TIMEOUT
+            )
         except nats.errors.TimeoutError:
             return (
                 f"Auth handshake timed out for '{target}'. "
@@ -218,9 +221,9 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         status = data.get("status")
         if status == "approved":
             state.auth_state[target] = "approved"
-            token = data.get("session_token")
-            if token:
-                state.session_tokens[target] = token
+            subject = data.get("session_subject")
+            if subject:
+                state.session_subjects[target] = subject
             return None
         else:
             reason = data.get("reason", "denied by operator")
@@ -274,17 +277,17 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             for _attempt in range(2):
                 if not (needs_session_channel(response) or session_expired(response)):
                     break
-                if session_expired(response) or target not in state.session_tokens:
+                if session_expired(response) or target not in state.session_subjects:
                     # Re-handshake once for a fresh channel token.
                     state.auth_state.pop(target, None)
-                    state.session_tokens.pop(target, None)
+                    state.session_subjects.pop(target, None)
                     auth_error = await _ensure_auth(state, target)
                     if auth_error:
                         return json.dumps({"error": auth_error})
-                token = state.session_tokens.get(target)
-                if not token:
+                subject = state.session_subjects.get(target)
+                if not subject:
                     break
-                response = await _send(session_subject(target, token, action))
+                response = await _send(session_call_subject(subject, action))
         except nats.errors.TimeoutError:
             return json.dumps({
                 "error": f"No response from '{target}' — Lightfall instance "
