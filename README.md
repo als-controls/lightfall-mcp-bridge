@@ -33,6 +33,15 @@ Add to your Claude Code MCP config (`.mcp.json` or settings):
 
 Optional: `--default-prefix als.7011` to set a default Lightfall instance.
 
+> **bcgnats requires a capability token.** bcgnats authorizes every connection through an
+> auth callout: the client must send a random secret as its connect `token` and connect with
+> the matching `_INBOX.<p>` inbox prefix. This client does both automatically
+> (`lightfall_bridge/nats_capability.py`, vendored byte-for-byte from `lightfall_utils.ipc.capability`), so there is
+> nothing to configure; a local `nats-server` without the callout ignores both. See
+> Lightfall's developer guide, *NATS Use Model* (`lightfall/docs/developer-guide/nats-use-model.md`).
+> The bridge runs Lightfall's handshake on the instance's private root
+> (`{priv_root}.auth.request`, discovered via `meta.actions`).
+
 ## Requirements
 
 - A running NATS server (local or remote)
