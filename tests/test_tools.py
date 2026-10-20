@@ -151,6 +151,9 @@ class TestSessionChannel:
         assert BridgeState(nc=None, default_prefix="").session_subjects == {}
 
 
+NO_RESPONDERS = object()
+
+
 class _Msg:
     def __init__(self, obj):
         self.data = json.dumps(obj).encode()
@@ -164,8 +167,13 @@ class _FakeNc:
         self.calls = []
 
     async def request(self, subject, payload=b"", timeout=0.5):
+        import nats.errors
+
         self.calls.append(subject)
-        return _Msg(self.replies[subject].pop(0))
+        reply = self.replies[subject].pop(0)
+        if reply is NO_RESPONDERS:
+            raise nats.errors.NoRespondersError
+        return _Msg(reply)
 
 
 APPROVED = "approved"
@@ -229,3 +237,53 @@ class TestExecuteActionHandshake:
         out = self._run(nc, state)
         assert out["response"] == {"status": "ok"}
         assert state.session_subjects["pre"] == "_PRIV.p.session.t2"
+
+    def test_stale_session_subject_no_responders_rehandshakes(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc(
+            {
+                "pre.meta.actions": [{"priv_root": "_PRIV.new"}],
+                "_PRIV.new.auth.request": [
+                    {"status": "approved", "session_subject": "_PRIV.new.session.t3"}
+                ],
+                "pre.commands.dev.get": [self.DENIED],
+                "_PRIV.old.session.t0.commands.dev.get": [NO_RESPONDERS],
+                "_PRIV.new.session.t3.commands.dev.get": [{"status": "ok"}],
+            }
+        )
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = "_PRIV.old.session.t0"
+        out = self._run(nc, state)
+        assert out["response"] == {"status": "ok"}
+        assert state.session_subjects["pre"] == "_PRIV.new.session.t3"
+
+    def test_double_no_responders_returns_clear_error(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc(
+            {
+                "pre.meta.actions": [{"priv_root": "_PRIV.new"}],
+                "_PRIV.new.auth.request": [
+                    {"status": "approved", "session_subject": "_PRIV.new.session.t3"}
+                ],
+                "pre.commands.dev.get": [self.DENIED],
+                "_PRIV.old.session.t0.commands.dev.get": [NO_RESPONDERS],
+                "_PRIV.new.session.t3.commands.dev.get": [NO_RESPONDERS],
+            }
+        )
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = "_PRIV.old.session.t0"
+        out = self._run(nc, state)
+        assert "not answering on its session channel" in out["error"]
+
+    def test_bare_subject_no_responders_is_a_json_error(self):
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc({"pre.commands.dev.get": [NO_RESPONDERS]})
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        out = self._run(nc, state)
+        assert "No Lightfall instance is answering" in out["error"]

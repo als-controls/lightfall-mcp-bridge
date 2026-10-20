@@ -272,9 +272,26 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             last_raw["data"] = msg.data
             return json.loads(msg.data)
 
+        def _not_answering() -> str:
+            return json.dumps({
+                "error": f"Lightfall instance '{target}' is not answering on its "
+                         "session channel (it may have restarted or logged out)"
+            })
+
+        async def _reset_auth() -> str | None:
+            state.auth_state.pop(target, None)
+            state.session_subjects.pop(target, None)
+            return await _ensure_auth(state, target)
+
         try:
-            response = await _send(f"{target}.{action}")
-            for _attempt in range(2):
+            try:
+                response = await _send(f"{target}.{action}")
+            except nats.errors.NoRespondersError:
+                return json.dumps({
+                    "error": f"No Lightfall instance is answering at '{target}'"
+                })
+            rehandshaked_on_dead = False
+            for _attempt in range(3):
                 if not (needs_session_channel(response) or session_expired(response)):
                     break
                 if session_expired(response) or target not in state.session_subjects:
@@ -287,7 +304,24 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                 subject = state.session_subjects.get(target)
                 if not subject:
                     break
-                response = await _send(session_call_subject(subject, action))
+                try:
+                    response = await _send(session_call_subject(subject, action))
+                except nats.errors.NoRespondersError:
+                    # Stale subject: the instance restarted (new _PRIV root) or
+                    # logged out. Re-handshake once and retry on the fresh one.
+                    if rehandshaked_on_dead:
+                        return _not_answering()
+                    rehandshaked_on_dead = True
+                    auth_error = await _reset_auth()
+                    if auth_error:
+                        return json.dumps({"error": auth_error})
+                    subject = state.session_subjects.get(target)
+                    if not subject:
+                        return _not_answering()
+                    try:
+                        response = await _send(session_call_subject(subject, action))
+                    except nats.errors.NoRespondersError:
+                        return _not_answering()
         except nats.errors.TimeoutError:
             return json.dumps({
                 "error": f"No response from '{target}' — Lightfall instance "
