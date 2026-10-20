@@ -8,3 +8,7 @@ build/
 .coverage
 htmlcov/
 *.egg
+
+# superpowers specs/plans/scratch: never commit
+.superpowers/
+docs/superpowers/
