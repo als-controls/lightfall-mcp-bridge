@@ -87,7 +87,7 @@ def format_execute_response(
     )
     return {
         "action": action,
-        "description": match["description"] if match else None,
+        "description": match.get("description") if match else None,
         "schema": match.get("schema") if match else None,
         "response": response,
     }
@@ -96,25 +96,38 @@ def format_execute_response(
 def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
     """Build and return the FastMCP server."""
 
-    @lifespan
-    async def nats_lifespan(server):
-        nc = None
+    connect_lock = asyncio.Lock()
+
+    async def _connect() -> nats.NATS | None:
         try:
             nc = await nats.connect(nats_url, **new_capability().connect_kwargs())
-            logger.info("Connected to NATS at %s", nats_url)
         except Exception as exc:
             logger.warning("Failed to connect to NATS at %s: %s", nats_url, exc)
-        state = BridgeState(nc=nc, default_prefix=default_prefix)
+            return None
+        logger.info("Connected to NATS at %s", nats_url)
+        return nc
+
+    @lifespan
+    async def nats_lifespan(server):
+        state = BridgeState(nc=await _connect(), default_prefix=default_prefix)
         try:
             yield {"bridge": state}
         finally:
-            if nc:
-                await nc.drain()
+            if state.nc:
+                await state.nc.drain()
 
     mcp = FastMCP("Lightfall Bridge", lifespan=nats_lifespan)
 
     def _get_state(ctx: Context) -> BridgeState:
         return ctx.lifespan_context["bridge"]
+
+    async def _ensure_nc(state: BridgeState) -> bool:
+        """Connect lazily if NATS was not up when the bridge started."""
+        if state.nc is None:
+            async with connect_lock:
+                if state.nc is None:
+                    state.nc = await _connect()
+        return state.nc is not None
 
     @mcp.tool
     async def list_instances(ctx: Context) -> str:
@@ -124,37 +137,37 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         2-second window. Returns a JSON array of discovered instances.
         """
         state = _get_state(ctx)
-        if state.nc is None:
+        if not await _ensure_nc(state):
             return json.dumps({"error": f"Cannot connect to NATS at {nats_url}"})
 
         nc = state.nc
         inbox = nc.new_inbox()
         sub = await nc.subscribe(inbox)
-        await nc.publish(DISCOVER_SUBJECT, b"{}", reply=inbox)
-
         responses: list[dict] = []
-        deadline = asyncio.get_event_loop().time() + DISCOVER_TIMEOUT
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                break
-            try:
-                msg = await asyncio.wait_for(
-                    sub.next_msg(), timeout=remaining
-                )
-                data = json.loads(msg.data)
-                responses.append({
-                    "instance_id": data.get("instance_id"),
-                    "display_name": data.get("display_name"),
-                    "prefix": data.get("prefix"),
-                    "actions_count": len(data.get("actions", [])),
-                })
-            except asyncio.TimeoutError:
-                break
-            except Exception as exc:
-                logger.warning("Bad discover response: %s", exc)
-
-        await sub.unsubscribe()
+        try:
+            await nc.publish(DISCOVER_SUBJECT, b"{}", reply=inbox)
+            deadline = asyncio.get_event_loop().time() + DISCOVER_TIMEOUT
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    break
+                try:
+                    msg = await asyncio.wait_for(
+                        sub.next_msg(), timeout=remaining
+                    )
+                    data = json.loads(msg.data)
+                    responses.append({
+                        "instance_id": data.get("instance_id"),
+                        "display_name": data.get("display_name"),
+                        "prefix": data.get("prefix"),
+                        "actions_count": len(data.get("actions", [])),
+                    })
+                except asyncio.TimeoutError:
+                    break
+                except Exception as exc:
+                    logger.warning("Bad discover response: %s", exc)
+        finally:
+            await sub.unsubscribe()
         return json.dumps(responses, indent=2)
 
     @mcp.tool
@@ -166,7 +179,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                     Falls back to the configured default prefix.
         """
         state = _get_state(ctx)
-        if state.nc is None:
+        if not await _ensure_nc(state):
             return json.dumps({"error": f"Cannot connect to NATS at {nats_url}"})
 
         try:
@@ -200,16 +213,15 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
         return json.dumps(data, indent=2)
 
     async def _ensure_auth(state: BridgeState, target: str) -> str | None:
-        """Perform auth handshake if needed. Returns error string or None."""
-        auth = state.auth_state.get(target)
-        if auth == "approved":
+        """Perform auth handshake if needed. Returns error string or None.
+
+        Only an approval that came with a session channel is cached. A
+        denial (or an approval without a channel) is not, so the next call
+        handshakes again and the operator can still approve the prompt.
+        """
+        if state.auth_state.get(target) == "approved":
             return None
-        if auth == "denied":
-            return (
-                f"Lightfall instance at '{target}' denied access. "
-                "Approve the trust prompt in Lightfall to continue."
-            )
-        # First contact — do handshake
+        # No usable approval yet: do the handshake
         payload = {
             "app_name": "claude-code-bridge",
             "app_version": "0.1.0",
@@ -228,14 +240,16 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
 
         status = data.get("status")
         if status == "approved":
-            state.auth_state[target] = "approved"
             subject = data.get("session_subject")
             if subject:
+                state.auth_state[target] = "approved"
                 state.session_subjects[target] = subject
+            else:
+                state.auth_state.pop(target, None)
             return None
         else:
             reason = data.get("reason", "denied by operator")
-            state.auth_state[target] = "denied"
+            state.auth_state.pop(target, None)
             return (
                 f"Lightfall instance at '{target}' denied access: {reason}. "
                 "Approve the trust prompt in Lightfall to continue."
@@ -256,7 +270,7 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             prefix: Topic prefix of the Lightfall instance. Falls back to default.
         """
         state = _get_state(ctx)
-        if state.nc is None:
+        if not await _ensure_nc(state):
             return json.dumps({"error": f"Cannot connect to NATS at {nats_url}"})
 
         try:
@@ -333,8 +347,12 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
             if not state.session_subjects.get(target):
                 return _no_channel()
 
+            # Budgets are separate so a re-handshake always gets a send on the
+            # fresh channel: one for a dead subject (no responders), two for
+            # an expired token. At most four sends in total.
             rehandshaked_on_dead = False
-            for _attempt in range(3):
+            expired_refreshes = 0
+            while True:
                 subject = state.session_subjects.get(target)
                 if not subject:
                     return _no_channel()
@@ -349,21 +367,18 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
                     auth_error = await _reset_auth()
                     if auth_error:
                         return json.dumps({"error": auth_error})
-                    if not state.session_subjects.get(target):
-                        return _no_channel()
                     continue
                 if not session_expired(response):
                     break
-                if _attempt == 2:
-                    continue  # out of attempts: fall to the for/else error
+                if expired_refreshes == 2:
+                    return json.dumps({
+                        "error": f"Lightfall instance '{target}': session could not be refreshed"
+                    })
+                expired_refreshes += 1
                 # Re-handshake for a fresh channel token and retry.
                 auth_error = await _reset_auth()
                 if auth_error:
                     return json.dumps({"error": auth_error})
-            else:
-                return json.dumps({
-                    "error": f"Lightfall instance '{target}': session could not be refreshed"
-                })
         except nats.errors.TimeoutError:
             return json.dumps({
                 "error": f"No response from '{target}' — Lightfall instance "
