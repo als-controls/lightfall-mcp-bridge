@@ -468,6 +468,56 @@ class TestBugHuntRegressions:
         assert state.nc is nc
         assert out["response"] == {"actions": []}
 
+    def test_closed_connection_is_replaced(self, monkeypatch):
+        from lightfall_bridge import server
+        from lightfall_bridge.server import BridgeState
+
+        dead = _FakeNc({})
+        dead.is_closed = True
+        root = "_PRIV.pppppppppppppppppppppppppp"
+        fresh = _FakeNc(
+            {
+                "pre.meta.actions": [{"priv_root": root, "actions": []}],
+                f"{root}.auth.request": [_approved("t2")],
+                f"{root}.session.t2.commands.dev.get": [{"status": "ok"}],
+            }
+        )
+        seen_kwargs = {}
+
+        async def fake_connect(url, **kw):
+            seen_kwargs.update(kw)
+            return fresh
+
+        monkeypatch.setattr(server.nats, "connect", fake_connect)
+        state = BridgeState(nc=dead, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        state.session_subjects["pre"] = "_PRIV.old.session.x"
+        out = self._tool("execute_action", state, action="commands.dev.get", params={})
+        assert state.nc is fresh
+        assert out["response"] == {"status": "ok"}
+        assert dead.calls == []
+        # The stale session channel from the closed connection was dropped and
+        # a fresh handshake ran on the new connection.
+        assert state.session_subjects["pre"] == f"{root}.session.t2"
+        # The new client never gives up reconnecting on its own.
+        assert seen_kwargs["max_reconnect_attempts"] == -1
+
+    def test_open_connection_is_kept(self, monkeypatch):
+        from lightfall_bridge import server
+        from lightfall_bridge.server import BridgeState
+
+        nc = _FakeNc({"pre.meta.actions": [{"actions": []}]})
+        nc.is_closed = False
+
+        async def fail_connect(url, **kw):
+            raise AssertionError("must not reconnect an open client")
+
+        monkeypatch.setattr(server.nats, "connect", fail_connect)
+        state = BridgeState(nc=nc, default_prefix="pre")
+        state.auth_state["pre"] = "approved"
+        out = self._tool("execute_action", state, action="meta.actions", params={})
+        assert state.nc is nc and out["response"] == {"actions": []}
+
     def test_list_instances_unsubscribes_when_publish_fails(self):
         from lightfall_bridge.server import BridgeState
 

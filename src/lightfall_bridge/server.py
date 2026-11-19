@@ -100,7 +100,16 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
 
     async def _connect() -> nats.NATS | None:
         try:
-            nc = await nats.connect(nats_url, **new_capability().connect_kwargs())
+            nc = await nats.connect(
+                nats_url,
+                # Keep retrying for as long as the bridge runs: Lightfall hosts
+                # the local nats-server, so a Lightfall restart takes the broker
+                # down for longer than nats-py's default ~2 min of attempts,
+                # after which the client closes for good.
+                max_reconnect_attempts=-1,
+                reconnect_time_wait=2,
+                **new_capability().connect_kwargs(),
+            )
         except Exception as exc:
             logger.warning("Failed to connect to NATS at %s: %s", nats_url, exc)
             return None
@@ -121,11 +130,22 @@ def create_server(nats_url: str, default_prefix: str = "") -> FastMCP:
     def _get_state(ctx: Context) -> BridgeState:
         return ctx.lifespan_context["bridge"]
 
+    def _usable(nc: nats.NATS | None) -> bool:
+        return nc is not None and not getattr(nc, "is_closed", False)
+
     async def _ensure_nc(state: BridgeState) -> bool:
-        """Connect lazily if NATS was not up when the bridge started."""
-        if state.nc is None:
+        """Connect lazily if NATS was not up when the bridge started, and
+        replace a client that has closed (e.g. it gave up reconnecting while
+        Lightfall's broker was down) instead of failing every later call."""
+        if not _usable(state.nc):
             async with connect_lock:
-                if state.nc is None:
+                if not _usable(state.nc):
+                    if state.nc is not None:
+                        logger.info("NATS connection closed; reconnecting to %s", nats_url)
+                        # Session channels belonged to the old connection (and
+                        # usually to a Lightfall that has since restarted).
+                        state.auth_state.clear()
+                        state.session_subjects.clear()
                     state.nc = await _connect()
         return state.nc is not None
 
